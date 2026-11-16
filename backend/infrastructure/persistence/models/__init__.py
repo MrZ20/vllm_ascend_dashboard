@@ -49,6 +49,7 @@ __all__ = [
     "ContributorScoringVersion", "ContributorScoreSnapshot", "ContributorScoreUpdateAudit",
     "ContributorAIReport",
     "ReleaseWorkflow", "ReleaseBuildRun", "ReleaseBuildGroup",
+    "ImageBuildMonitorTarget", "ImageBuildAlert",
     "ReleaseThirdPartyVersion", "ReleaseThirdPartyBaseline",
     "ReleaseAIEvaluation", "ReleaseAnalysisTask",
 ]
@@ -64,6 +65,10 @@ from infrastructure.persistence.models.release_management import (
     ReleaseThirdPartyBaseline,
     ReleaseThirdPartyVersion,
     ReleaseWorkflow,
+)
+from infrastructure.persistence.models.image_build_monitor import (
+    ImageBuildAlert,
+    ImageBuildMonitorTarget,
 )
 
 

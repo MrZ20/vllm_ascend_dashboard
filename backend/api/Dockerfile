@@ -73,6 +73,7 @@ COPY backend/resource_dashboard/ ./resource_dashboard/
 COPY backend/log_center/ ./log_center/
 COPY backend/tooling/ ./tooling/
 COPY backend/failure_analysis/ ./failure_analysis/
+COPY backend/image_build_monitor/ ./image_build_monitor/
 COPY backend/test_board/ ./test_board/
 COPY backend/model_sync/ ./model_sync/
 COPY backend/support_matrix/ ./support_matrix/

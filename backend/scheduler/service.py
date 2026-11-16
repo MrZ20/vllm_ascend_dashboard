@@ -557,6 +557,24 @@ class DataSyncScheduler:
         except Exception as e:
             logger.error(f"Failed to add release sync job: {e}", exc_info=True)
 
+        # 镜像构建监控 - 定时检测失败/未触发/卡住并邮件通知
+        try:
+            monitor_enabled = getattr(settings, 'IMAGE_BUILD_MONITOR_ENABLED', True)
+            if monitor_enabled:
+                monitor_interval = getattr(settings, 'IMAGE_BUILD_MONITOR_INTERVAL_MINUTES', 10)
+                self.scheduler.add_job(
+                    self._image_build_monitor_job,
+                    trigger=IntervalTrigger(minutes=monitor_interval),
+                    id="image_build_monitor_check",
+                    name="Image Build Monitor Check",
+                    replace_existing=True,
+                )
+                logger.info(
+                    "Image build monitor scheduled every %s minutes", monitor_interval
+                )
+        except Exception as e:
+            logger.error(f"Failed to add image build monitor job: {e}", exc_info=True)
+
         # Release management - daily AI evaluation
         try:
             ai_eval_enabled = getattr(settings, 'RELEASE_AI_EVAL_ENABLED', True)
@@ -1798,6 +1816,27 @@ class DataSyncScheduler:
                         logger.error(f"Release sync failed for workflow {wf['id']}: {e}")
             except Exception as e:
                 logger.error(f"Release sync job failed: {e}", exc_info=True)
+            finally:
+                await db.close()
+
+    async def _image_build_monitor_job(self):
+        """Evaluate image build monitor targets and send alerts."""
+        async with SessionLocal() as db:
+            try:
+                from image_build_monitor.service import ImageBuildMonitorService
+
+                result = await ImageBuildMonitorService(db).evaluate_all()
+                logger.info(
+                    "Image build monitor checked %s targets: created=%s notified=%s resolved=%s",
+                    result.get("targets"),
+                    result.get("created"),
+                    result.get("notified"),
+                    result.get("resolved"),
+                )
+                if result.get("errors"):
+                    logger.warning("Image build monitor errors: %s", result["errors"])
+            except Exception as e:
+                logger.error(f"Image build monitor job failed: {e}", exc_info=True)
             finally:
                 await db.close()
 

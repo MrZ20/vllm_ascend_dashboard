@@ -68,6 +68,7 @@ packages = [
     "contracts",
     "contributor_board",
     "failure_analysis",
+    "image_build_monitor",
     "infrastructure",
     "log_center",
     "model_sync",

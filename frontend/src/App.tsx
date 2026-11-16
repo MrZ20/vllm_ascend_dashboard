@@ -39,6 +39,7 @@ import LogCenter from './pages/LogCenter'
 import ShareReport from './pages/ShareReport'
 import ReleaseManagement from './components/release/ReleaseManagement'
 import BuildRunDetail from './pages/BuildRunDetail'
+import ImageBuildMonitor from './pages/ImageBuildMonitor'
 import { useCurrentUser } from './hooks/useCurrentUser'
 import { appBasePath } from './utils/basePath'
 
@@ -193,6 +194,7 @@ function App() {
             }>
               <Route index element={<Dashboard />} />
               <Route path="ci" element={<CIBoard />} />
+              <Route path="image-build-monitor" element={<ImageBuildMonitor />} />
               {/* Project Dashboard */}
               <Route path="project" element={<ProjectBoard />} />
               {/* Contributor Board - super_admin only */}

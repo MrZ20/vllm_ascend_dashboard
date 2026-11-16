@@ -34,6 +34,7 @@ from api.v1 import (
     contributor_scoring,
     daily_report,
     daily_summary,
+    image_build_monitor,
     issue_diagnosis,
     job_owners,
     logs,
@@ -640,6 +641,11 @@ def create_app() -> FastAPI:
     # 注册路由
     app.include_router(auth.router, prefix="/api/v1/auth", tags=["认证"])
     app.include_router(ci.router, prefix="/api/v1/ci", tags=["CI 数据"])
+    app.include_router(
+        image_build_monitor.router,
+        prefix="/api/v1/image-build-monitor",
+        tags=["镜像构建监控"],
+    )
     app.include_router(commit_analysis.router, prefix="/api/v1/commit-analysis", tags=["Commit 分析"])
     app.include_router(daily_summary.router, prefix="/api/v1", tags=["每日总结"])
     app.include_router(models.router, prefix="/api/v1/models", tags=["模型管理"])
