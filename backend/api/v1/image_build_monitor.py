@@ -9,6 +9,8 @@ from sqlalchemy import select
 
 from api.deps import CurrentAdminUser, CurrentUser, DbSession
 from image_build_monitor.service import ImageBuildMonitorService
+from infrastructure.clients.github_client import GitHubClient
+from infrastructure.core.config import settings
 from infrastructure.persistence.models import ImageBuildMonitorTarget, ReleaseWorkflow
 
 router = APIRouter()
@@ -27,6 +29,11 @@ class TargetPayload(BaseModel):
     notify_on_stuck: bool = True
     stuck_threshold_minutes: int = Field(default=180, ge=5, le=2880)
     cooldown_minutes: int = Field(default=60, ge=5, le=10080)
+
+
+class TestEmailPayload(BaseModel):
+    recipients: list[str] = Field(min_length=1)
+    target_id: int | None = None
 
 
 def _apply_payload(target: ImageBuildMonitorTarget, payload: TargetPayload) -> None:
@@ -50,6 +57,34 @@ async def get_overview(
     days_back: int = Query(default=7, ge=1, le=90),
 ) -> dict[str, Any]:
     return await ImageBuildMonitorService(db).get_overview(days_back)
+
+
+@router.get("/github-status")
+async def get_github_status(_: CurrentUser) -> dict[str, Any]:
+    if not settings.GITHUB_TOKEN:
+        return {"ok": False, "mode": "none", "message": "未配置 GITHUB_TOKEN"}
+    client = GitHubClient(
+        token=settings.GITHUB_TOKEN,
+        owner=settings.GITHUB_OWNER,
+        repo=settings.GITHUB_REPO,
+    )
+    try:
+        data = await client._request("GET", "/rate_limit")
+        core = (data.get("resources") or {}).get("core") or {}
+        return {
+            "ok": True,
+            "mode": "anonymous" if not client.token else "authenticated",
+            "remaining": core.get("remaining"),
+            "message": "GitHub 可正常访问",
+        }
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "ok": False,
+            "mode": "anonymous" if not client.token else "token_invalid",
+            "message": str(exc),
+        }
+    finally:
+        await client.close()
 
 
 @router.get("/targets")
@@ -187,4 +222,16 @@ async def renotify_alert(alert_id: int, db: DbSession, _: CurrentAdminUser) -> d
 
 @router.post("/check")
 async def run_check(db: DbSession, _: CurrentAdminUser) -> dict[str, Any]:
-    return await ImageBuildMonitorService(db).evaluate_all()
+    return await ImageBuildMonitorService(db).evaluate_all(sync_remote=True)
+
+
+@router.post("/test-email")
+async def send_test_email(
+    payload: TestEmailPayload,
+    db: DbSession,
+    _: CurrentAdminUser,
+) -> dict[str, Any]:
+    recipients = [e.strip() for e in payload.recipients if e.strip()]
+    if not recipients:
+        raise HTTPException(status_code=400, detail="请至少填写一个收件邮箱")
+    return await ImageBuildMonitorService(db).send_test_email(recipients, payload.target_id)

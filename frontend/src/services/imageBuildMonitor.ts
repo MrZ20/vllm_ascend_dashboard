@@ -114,6 +114,18 @@ export interface TargetRun {
   url: string | null
 }
 
+export interface GithubStatus {
+  ok: boolean
+  mode: 'authenticated' | 'anonymous' | 'none' | 'token_invalid'
+  remaining?: number | null
+  message: string
+}
+
+export const getGithubStatus = async (): Promise<GithubStatus> => {
+  const { data } = await api.get<GithubStatus>('/image-build-monitor/github-status')
+  return data
+}
+
 export const getOverview = async (daysBack = 7): Promise<MonitorOverview> => {
   const { data } = await api.get<MonitorOverview>('/image-build-monitor/overview', {
     params: { days_back: daysBack },
@@ -174,7 +186,27 @@ export const renotifyAlert = async (id: number): Promise<void> => {
   await api.post(`/image-build-monitor/alerts/${id}/renotify`)
 }
 
-export const runCheck = async (): Promise<{ created: number; notified: number; resolved: number; targets: number }> => {
+export const runCheck = async (): Promise<{
+  created: number
+  notified: number
+  resolved: number
+  targets: number
+  synced_runs?: number
+  errors?: string[]
+}> => {
   const { data } = await api.post('/image-build-monitor/check')
+  return data
+}
+
+export const sendTestEmail = async (payload: {
+  recipients: string[]
+  target_id?: number
+}): Promise<{
+  success: boolean
+  recipients: string[]
+  error: string | null
+  subject: string
+}> => {
+  const { data } = await api.post('/image-build-monitor/test-email', payload)
   return data
 }

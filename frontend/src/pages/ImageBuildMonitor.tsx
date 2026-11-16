@@ -1,5 +1,6 @@
 import { useMemo, useState } from 'react'
 import dayjs from 'dayjs'
+import { useNavigate } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   Alert,
@@ -20,6 +21,7 @@ import {
   Switch,
   Table,
   Tag,
+  TimePicker,
   Tooltip,
   Typography,
   message,
@@ -42,6 +44,7 @@ import {
   createTarget,
   deleteTarget,
   getOverview,
+  getGithubStatus,
   getTargetRuns,
   listAlerts,
   listCandidates,
@@ -49,6 +52,7 @@ import {
   renotifyAlert,
   resolveAlert,
   runCheck,
+  sendTestEmail,
   updateTarget,
   type MonitorAlert,
   type MonitorTarget,
@@ -82,8 +86,32 @@ const RUN_STATUS_COLOR: Record<string, string> = {
   failure: 'red',
   cancelled: 'default',
   timed_out: 'volcano',
+  startup_failure: 'volcano',
   in_progress: 'processing',
   queued: 'blue',
+  waiting: 'blue',
+  requested: 'blue',
+  pending: 'blue',
+  skipped: 'default',
+  neutral: 'default',
+  action_required: 'orange',
+}
+
+const RUN_STATUS_ZH: Record<string, string> = {
+  success: '成功',
+  failure: '失败',
+  cancelled: '已取消',
+  timed_out: '超时',
+  startup_failure: '启动失败',
+  in_progress: '运行中',
+  queued: '排队中',
+  waiting: '等待中',
+  requested: '请求中',
+  pending: '待处理',
+  completed: '已完成',
+  skipped: '已跳过',
+  neutral: '中性',
+  action_required: '需处理',
 }
 
 function fmtTime(value: string | null | undefined) {
@@ -98,19 +126,91 @@ function fmtDuration(seconds: number | null | undefined) {
   return `${Math.floor(m / 60)}h${m % 60}m`
 }
 
+const WEEKDAY_OPTIONS = [
+  { value: 1, label: '周一' },
+  { value: 2, label: '周二' },
+  { value: 3, label: '周三' },
+  { value: 4, label: '周四' },
+  { value: 5, label: '周五' },
+  { value: 6, label: '周六' },
+  { value: 0, label: '周日' },
+]
+
+function buildCron(values: {
+  frequency: string
+  minute?: number
+  time?: dayjs.Dayjs
+  weekdays?: number[]
+  day?: number
+  custom?: string
+}): string {
+  const minute = values.minute ?? 0
+  const hour = values.time?.hour() ?? 2
+  const min = values.time?.minute() ?? 0
+  switch (values.frequency) {
+    case 'hourly':
+      return `${minute} * * * *`
+    case 'weekly':
+      return `${min} ${hour} * * ${(values.weekdays?.length ? values.weekdays : [1]).join(',')}`
+    case 'monthly':
+      return `${min} ${hour} ${values.day ?? 1} * *`
+    case 'custom':
+      return (values.custom || '').trim()
+    case 'daily':
+    default:
+      return `${min} ${hour} * * *`
+  }
+}
+
+function describeCron(values: {
+  frequency: string
+  minute?: number
+  time?: dayjs.Dayjs
+  weekdays?: number[]
+  day?: number
+  custom?: string
+}): string {
+  const time = values.time ? values.time.format('HH:mm') : '02:00'
+  switch (values.frequency) {
+    case 'hourly':
+      return `每小时第 ${values.minute ?? 0} 分钟执行`
+    case 'weekly':
+      return `每周 ${(values.weekdays?.length ? values.weekdays : [1]).join('、')} 的 ${time} 执行`
+    case 'monthly':
+      return `每月 ${values.day ?? 1} 日 ${time} 执行`
+    case 'custom':
+      return '自定义 5 段 cron 表达式'
+    case 'daily':
+    default:
+      return `每天 ${time} 执行`
+  }
+}
+
 export default function ImageBuildMonitor() {
   const queryClient = useQueryClient()
+  const navigate = useNavigate()
   const [days, setDays] = useState(7)
   const [modalOpen, setModalOpen] = useState(false)
   const [editing, setEditing] = useState<MonitorTarget | null>(null)
   const [runTarget, setRunTarget] = useState<MonitorTarget | null>(null)
   const [alertStatus, setAlertStatus] = useState<string | undefined>('open')
   const [alertType, setAlertType] = useState<string | undefined>()
+  const [cronOpen, setCronOpen] = useState(false)
+  const [emailOpen, setEmailOpen] = useState(false)
   const [form] = Form.useForm()
+  const [cronForm] = Form.useForm()
+  const [emailForm] = Form.useForm()
+  const cronFrequency = Form.useWatch('frequency', cronForm)
+  const cronValues = Form.useWatch([], cronForm)
 
   const overviewQuery = useQuery({
     queryKey: ['image-build-monitor-overview', days],
     queryFn: () => getOverview(days),
+  })
+  const githubStatusQuery = useQuery({
+    queryKey: ['image-build-monitor-github-status'],
+    queryFn: getGithubStatus,
+    staleTime: 60_000,
   })
   const targetsQuery = useQuery({
     queryKey: ['image-build-monitor-targets'],
@@ -141,6 +241,7 @@ export default function ImageBuildMonitor() {
     queryClient.invalidateQueries({ queryKey: ['image-build-monitor-targets'] })
     queryClient.invalidateQueries({ queryKey: ['image-build-monitor-candidates'] })
     queryClient.invalidateQueries({ queryKey: ['image-build-monitor-alerts'] })
+    queryClient.invalidateQueries({ queryKey: ['image-build-monitor-github-status'] })
   }
 
   const saveMutation = useMutation({
@@ -163,12 +264,33 @@ export default function ImageBuildMonitor() {
   const checkMutation = useMutation({
     mutationFn: runCheck,
     onSuccess: (res) => {
-      message.success(
-        `检测完成：新增 ${res.created} 条告警，通知 ${res.notified} 条，恢复 ${res.resolved} 条`,
-      )
+      if (res.targets === 0) {
+        message.warning('当前没有启用的监控目标，请先点击「新增监控」配置目标')
+      } else {
+        message.success(
+          `检测完成：同步 ${res.synced_runs ?? 0} 条 GitHub 运行，新增 ${res.created} 条告警，通知 ${res.notified} 条，恢复 ${res.resolved} 条`,
+        )
+      }
+      if (res.errors?.length) {
+        message.warning(`部分目标同步失败：${res.errors.join('；')}`)
+      }
       refreshAll()
     },
     onError: (e: Error) => message.error(`检测失败：${e.message}`),
+  })
+
+  const testEmailMutation = useMutation({
+    mutationFn: sendTestEmail,
+    onSuccess: (res) => {
+      if (res.success) {
+        message.success(`测试邮件已发送至 ${res.recipients.join(', ')}`)
+        setEmailOpen(false)
+        emailForm.resetFields()
+      } else {
+        message.error(`邮件发送失败：${res.error || '请检查 SMTP 配置'}`)
+      }
+    },
+    onError: (e: Error) => message.error(`邮件发送失败：${e.message}`),
   })
 
   const actionMutation = useMutation({
@@ -246,6 +368,39 @@ export default function ImageBuildMonitor() {
     setModalOpen(true)
   }
 
+  const openCronBuilder = () => {
+    const current = (form.getFieldValue('schedule_cron') as string | undefined) || ''
+    cronForm.setFieldsValue({
+      frequency: current ? 'custom' : 'daily',
+      minute: 0,
+      time: dayjs().hour(2).minute(0).second(0),
+      weekdays: [1, 2, 3, 4, 5],
+      day: 1,
+      custom: current,
+    })
+    setCronOpen(true)
+  }
+
+  const applyCron = async () => {
+    const values = await cronForm.validateFields()
+    const cron = buildCron(values)
+    if (!cron) {
+      message.warning('请填写 cron 表达式')
+      return
+    }
+    form.setFieldValue('schedule_cron', cron)
+    setCronOpen(false)
+  }
+
+  const openEmailTest = () => {
+    const firstTarget = targets[0]
+    emailForm.setFieldsValue({
+      recipients: firstTarget?.notify_emails ?? [],
+      target_id: firstTarget?.id,
+    })
+    setEmailOpen(true)
+  }
+
   const targetColumns: TableColumnsType<MonitorTarget> = [
     {
       title: 'Workflow',
@@ -292,7 +447,7 @@ export default function ImageBuildMonitor() {
         return (
           <div>
             <Tag color={RUN_STATUS_COLOR[r.latest_run.status || ''] || 'default'}>
-              {r.latest_run.status || '-'}
+              {RUN_STATUS_ZH[r.latest_run.status || ''] ?? r.latest_run.status ?? '-'}
             </Tag>
             <div style={{ fontSize: 12, color: '#999' }}>
               {fmtTime(r.latest_run.created_at)} · {fmtDuration(r.latest_run.wall_duration)}
@@ -468,11 +623,24 @@ export default function ImageBuildMonitor() {
           >
             立即检测
           </Button>
+          <Button icon={<MailOutlined />} onClick={openEmailTest}>
+            邮件测试
+          </Button>
           <Button type="primary" icon={<PlusOutlined />} onClick={openCreate}>
             新增监控
           </Button>
         </Space>
       </div>
+
+      {githubStatusQuery.data && !githubStatusQuery.data.ok && (
+        <Alert
+          type="warning"
+          showIcon
+          style={{ marginBottom: 16 }}
+          message={`GitHub 数据源不可用（${githubStatusQuery.data.mode}）`}
+          description={`${githubStatusQuery.data.message}。请到「管理 → 系统配置 → 编辑 GitHub」更新有效 Token 后重试；否则「立即检测」只能基于本地已采集的历史数据。`}
+        />
+      )}
 
       {overview && overview.open_alerts > 0 && (
         <Alert
@@ -603,7 +771,14 @@ export default function ImageBuildMonitor() {
                 label="期望调度 Cron"
                 tooltip="5 段 cron，例如 0 2 * * *；留空则不做未触发检测"
               >
-                <Input placeholder="0 2 * * *" />
+                <Input
+                  placeholder="0 2 * * *"
+                  addonAfter={
+                    <Button type="link" size="small" style={{ padding: 0 }} onClick={openCronBuilder}>
+                      可视化
+                    </Button>
+                  }
+                />
               </Form.Item>
             </Col>
             <Col span={12}>
@@ -677,19 +852,37 @@ export default function ImageBuildMonitor() {
       </Modal>
 
       <Drawer
-        title={runTarget ? `${runTarget.workflow_name} · 最近运行` : '最近运行'}
+        title={
+          <span style={{ display: 'block', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+            {runTarget ? `${runTarget.workflow_name} · 最近运行` : '最近运行'}
+          </span>
+        }
         open={!!runTarget}
         onClose={() => setRunTarget(null)}
-        width={720}
+        width={920}
       >
         {runTarget && (
-          <Descriptions size="small" column={2} style={{ marginBottom: 16 }}>
-            <Descriptions.Item label="仓库">{runTarget.repo_owner}/{runTarget.repo_name}</Descriptions.Item>
+          <Descriptions
+            size="small"
+            column={2}
+            bordered
+            style={{ marginBottom: 16 }}
+            labelStyle={{ width: 96, whiteSpace: 'nowrap', background: '#fafafa' }}
+            contentStyle={{ whiteSpace: 'nowrap' }}
+          >
+            <Descriptions.Item label="仓库">
+              <Tag color="blue">{runTarget.repo_owner}/{runTarget.repo_name}</Tag>
+            </Descriptions.Item>
             <Descriptions.Item label="期望调度">
-              <Tag color={runTarget.schedule_cron ? 'blue' : 'default'}>{runTarget.schedule_cron || '未配置'}</Tag>
+              <Tag color={runTarget.schedule_cron ? 'geekblue' : 'default'}>
+                {runTarget.schedule_cron || '未配置'}
+              </Tag>
+              <Text type="secondary" style={{ marginLeft: 8 }}>{runTarget.timezone}</Text>
             </Descriptions.Item>
             <Descriptions.Item label="最近检测">{fmtTime(runTarget.last_checked_at)}</Descriptions.Item>
-            <Descriptions.Item label="未处理告警">{runTarget.open_alert_count}</Descriptions.Item>
+            <Descriptions.Item label="未处理告警">
+              <Tag color={runTarget.open_alert_count > 0 ? 'red' : 'green'}>{runTarget.open_alert_count}</Tag>
+            </Descriptions.Item>
           </Descriptions>
         )}
         <Table
@@ -698,29 +891,170 @@ export default function ImageBuildMonitor() {
           loading={runsQuery.isLoading}
           dataSource={runsQuery.data ?? []}
           pagination={false}
+          scroll={{ x: 860 }}
           columns={[
             {
               title: 'Run',
               key: 'run',
+              width: 190,
               render: (_, r) => (
-                <Space>
-                  <Text>#{r.github_run_id}</Text>
-                  {r.url && <Button size="small" type="link" icon={<LinkOutlined />} href={r.url} target="_blank">GitHub</Button>}
+                <Space size={4} style={{ whiteSpace: 'nowrap' }}>
+                  <Text strong>#{r.github_run_id}</Text>
+                  {r.url && (
+                    <Button size="small" type="link" icon={<LinkOutlined />} href={r.url} target="_blank">
+                      GitHub
+                    </Button>
+                  )}
                 </Space>
               ),
             },
             {
               title: '状态',
               dataIndex: 'status',
-              render: (v: string) => <Tag color={RUN_STATUS_COLOR[v || ''] || 'default'}>{v || '-'}</Tag>,
+              width: 100,
+              render: (v: string) => <Tag color={RUN_STATUS_COLOR[v || ''] || 'default'}>{RUN_STATUS_ZH[v || ''] ?? v ?? '-'}</Tag>,
             },
-            { title: 'Event', dataIndex: 'event', render: (v: string) => v || '-' },
-            { title: '分支', dataIndex: 'branch', render: (v: string) => v || '-' },
-            { title: '创建时间', dataIndex: 'created_at', render: (v: string) => fmtTime(v) },
-            { title: '耗时', dataIndex: 'wall_duration', render: (v: number) => fmtDuration(v) },
+            {
+              title: 'Event',
+              dataIndex: 'event',
+              width: 140,
+              ellipsis: true,
+              render: (v: string) => <Text style={{ whiteSpace: 'nowrap' }}>{v || '-'}</Text>,
+            },
+            {
+              title: '分支',
+              dataIndex: 'branch',
+              width: 220,
+              ellipsis: { showTitle: true },
+              render: (v: string) => <Text style={{ whiteSpace: 'nowrap' }}>{v || '-'}</Text>,
+            },
+            {
+              title: '创建时间',
+              dataIndex: 'created_at',
+              width: 160,
+              render: (v: string) => <Text style={{ whiteSpace: 'nowrap' }}>{fmtTime(v)}</Text>,
+            },
+            {
+              title: '耗时',
+              dataIndex: 'wall_duration',
+              width: 90,
+              render: (v: number) => <Text style={{ whiteSpace: 'nowrap' }}>{fmtDuration(v)}</Text>,
+            },
           ]}
         />
       </Drawer>
+
+      <Modal
+        title="可视化配置 Cron"
+        open={cronOpen}
+        onCancel={() => setCronOpen(false)}
+        onOk={applyCron}
+        okText="应用"
+        destroyOnClose
+      >
+        <Form form={cronForm} layout="vertical" onValuesChange={() => cronForm.validateFields().catch(() => undefined)}>
+          <Form.Item name="frequency" label="执行频率" rules={[{ required: true }]}>
+            <Select
+              options={[
+                { value: 'hourly', label: '每小时' },
+                { value: 'daily', label: '每天' },
+                { value: 'weekly', label: '每周' },
+                { value: 'monthly', label: '每月' },
+                { value: 'custom', label: '自定义表达式' },
+              ]}
+            />
+          </Form.Item>
+
+          {cronFrequency === 'hourly' && (
+            <Form.Item name="minute" label="每小时第几分钟">
+              <InputNumber min={0} max={59} style={{ width: '100%' }} />
+            </Form.Item>
+          )}
+
+          {['daily', 'weekly', 'monthly'].includes(cronFrequency) && (
+            <Form.Item name="time" label="执行时间" rules={[{ required: true, message: '请选择执行时间' }]}>
+              <TimePicker format="HH:mm" style={{ width: '100%' }} minuteStep={5} />
+            </Form.Item>
+          )}
+
+          {cronFrequency === 'weekly' && (
+            <Form.Item name="weekdays" label="每周执行日" rules={[{ required: true, message: '请选择星期' }]}>
+              <Select mode="multiple" options={WEEKDAY_OPTIONS} />
+            </Form.Item>
+          )}
+
+          {cronFrequency === 'monthly' && (
+            <Form.Item name="day" label="每月几号" rules={[{ required: true }]}>
+              <InputNumber min={1} max={28} style={{ width: '100%' }} />
+            </Form.Item>
+          )}
+
+          {cronFrequency === 'custom' && (
+            <Form.Item
+              name="custom"
+              label="5 段 Cron 表达式"
+              rules={[{ required: true, message: '请输入 cron 表达式' }]}
+            >
+              <Input placeholder="分 时 日 月 周，例如 0 2 * * *" />
+            </Form.Item>
+          )}
+
+          <Alert
+            type="info"
+            showIcon
+            message={`将生成：${buildCron(cronValues || { frequency: cronFrequency }) || '-'}`}
+            description={cronValues ? describeCron(cronValues) : undefined}
+          />
+        </Form>
+      </Modal>
+
+      <Modal
+        title="发送测试告警邮件"
+        open={emailOpen}
+        onCancel={() => setEmailOpen(false)}
+        onOk={() => emailForm.submit()}
+        confirmLoading={testEmailMutation.isPending}
+        okText="发送测试邮件"
+        destroyOnClose
+      >
+        <Alert
+          type="info"
+          showIcon
+          style={{ marginBottom: 16 }}
+          message="将使用数据库中已配置的 SMTP 服务发送一封真实邮件，内容与正式告警模板一致。"
+          description={
+            <span>
+              若发送失败提示「SMTP 未配置」，请先完成 SMTP 参数配置。
+              <Typography.Link onClick={() => navigate('/admin/smtp-config')}>
+                前往邮件服务配置
+              </Typography.Link>
+            </span>
+          }
+        />
+        <Form
+          form={emailForm}
+          layout="vertical"
+          onFinish={(values) => testEmailMutation.mutate(values)}
+        >
+          <Form.Item
+            name="recipients"
+            label="收件人"
+            rules={[{ required: true, message: '请填写至少一个邮箱' }]}
+          >
+            <Select mode="tags" tokenSeparators={[',', ';', ' ']} placeholder="输入邮箱后回车" />
+          </Form.Item>
+          <Form.Item name="target_id" label="邮件中的 Workflow（可选）">
+            <Select
+              allowClear
+              options={targets.map((t) => ({
+                value: t.id,
+                label: `${t.repo_name} · ${t.workflow_name}`,
+              }))}
+              placeholder="不选择则使用默认仓库信息"
+            />
+          </Form.Item>
+        </Form>
+      </Modal>
     </div>
   )
 }

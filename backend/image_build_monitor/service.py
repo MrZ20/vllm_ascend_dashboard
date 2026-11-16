@@ -14,6 +14,8 @@ from apscheduler.triggers.cron import CronTrigger
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from infrastructure.clients.github_client import GitHubClient
+from infrastructure.core.config import settings
 from infrastructure.core.email import get_smtp_config, send_email
 from infrastructure.persistence.models import (
     ImageBuildAlert,
@@ -40,6 +42,15 @@ def _as_utc(value: datetime | None) -> datetime | None:
 def _iso(value: datetime | None) -> str | None:
     dt = _as_utc(value)
     return dt.isoformat() if dt else None
+
+
+def _parse_gh_dt(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return _as_utc(datetime.fromisoformat(value.replace("Z", "+00:00")))
+    except ValueError:
+        return None
 
 
 def _normalize_emails(value: Any) -> list[str]:
@@ -341,6 +352,77 @@ class ImageBuildMonitorService:
         await self.db.commit()
         return await self._alert_with_workflow(alert)
 
+    async def send_test_email(
+        self, recipients: list[str], target_id: int | None = None
+    ) -> dict[str, Any]:
+        """发送一封真实的测试告警邮件，用于本地校验邮件内容。"""
+        target = await self.db.get(ImageBuildMonitorTarget, target_id) if target_id else None
+        wf = (
+            await self.db.get(ReleaseWorkflow, target.release_workflow_id)
+            if target
+            else None
+        )
+        if wf is None:
+            wf = (
+                await self.db.execute(
+                    select(ReleaseWorkflow)
+                    .where(
+                        (ReleaseWorkflow.workflow_name.ilike("%image%"))
+                        | (ReleaseWorkflow.workflow_path.ilike("%image%"))
+                    )
+                    .order_by(ReleaseWorkflow.id.desc())
+                    .limit(1)
+                )
+            ).scalar_one_or_none()
+        if wf is None:
+            wf = (await self.db.execute(select(ReleaseWorkflow).limit(1))).scalar_one_or_none()
+        if wf is None:
+            wf = ReleaseWorkflow(
+                repo_owner=settings.GITHUB_OWNER,
+                repo_name=settings.GITHUB_REPO,
+                workflow_name="Image Build Monitor Test",
+                workflow_path=".github/workflows/schedule_image_build_and_push.yaml",
+                workflow_id=0,
+            )
+        if target is None:
+            target = ImageBuildMonitorTarget(
+                release_workflow_id=wf.id or 0,
+                notify_emails=recipients,
+                cooldown_minutes=60,
+            )
+        else:
+            target.notify_emails = recipients
+
+        now = datetime.now(UTC)
+        sample = ImageBuildAlert(
+            target_id=target.id or 0,
+            release_workflow_id=wf.id or 0,
+            github_run_id=None,
+            alert_type="failure",
+            severity="critical",
+            status="open",
+            title=f"【测试】镜像构建失败：{wf.workflow_name}",
+            message=(
+                "这是一封测试邮件，用于验证镜像构建监控告警的邮件格式与收件配置。"
+                "真实告警会包含失败 run、分支、Job 汇总及 GitHub 链接。"
+            ),
+            run_url=f"https://github.com/{wf.repo_owner}/{wf.repo_name}/actions",
+            branch="main",
+            event="schedule",
+            dedupe_key=f"test:{now.isoformat()}",
+            first_detected_at=now,
+            last_detected_at=now,
+        )
+        await self._send_alerts_email(target, wf, [sample])
+        return {
+            "success": bool(sample.notification_success),
+            "recipients": recipients,
+            "error": sample.notification_error,
+            "subject": (
+                f"[vLLM Ascend 镜像构建告警] {wf.repo_name}/{wf.workflow_name} - 构建失败"
+            ),
+        }
+
     async def _alert_with_workflow(self, alert: ImageBuildAlert) -> dict[str, Any]:
         wf = await self.db.get(ReleaseWorkflow, alert.release_workflow_id)
         assert wf is not None
@@ -449,7 +531,7 @@ class ImageBuildMonitorService:
     # Evaluation
     # ------------------------------------------------------------------
 
-    async def evaluate_all(self) -> dict[str, Any]:
+    async def evaluate_all(self, sync_remote: bool = False) -> dict[str, Any]:
         targets = (
             await self.db.execute(
                 select(ImageBuildMonitorTarget, ReleaseWorkflow)
@@ -459,6 +541,7 @@ class ImageBuildMonitorService:
         ).all()
         summary = {
             "targets": len(targets),
+            "synced_runs": 0,
             "created": 0,
             "notified": 0,
             "resolved": 0,
@@ -466,6 +549,16 @@ class ImageBuildMonitorService:
         }
         for target, wf in targets:
             try:
+                if sync_remote:
+                    try:
+                        summary["synced_runs"] += await self._sync_recent_runs(wf)
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning(
+                            "Failed to refresh GitHub runs for workflow %s: %s",
+                            wf.id,
+                            exc,
+                        )
+                        summary["errors"].append(f"{wf.workflow_name} 同步 GitHub 失败: {exc}")
                 stats = await self._evaluate_target(target, wf)
                 summary["created"] += stats["created"]
                 summary["notified"] += stats["notified"]
@@ -480,6 +573,65 @@ class ImageBuildMonitorService:
                 summary["errors"].append(f"{wf.workflow_name}: {exc}")
                 await self.db.rollback()
         return summary
+
+    async def _sync_recent_runs(self, wf: ReleaseWorkflow, days_back: int = 2) -> int:
+        """通过真实 GitHub API 拉取目标 workflow 最近运行并落库。"""
+        client = GitHubClient(
+            token=settings.GITHUB_TOKEN,
+            owner=wf.repo_owner,
+            repo=wf.repo_name,
+        )
+        try:
+            runs = await client.get_workflow_runs(
+                str(wf.workflow_id),
+                per_page=50,
+                days_back=days_back,
+            )
+        finally:
+            await client.close()
+
+        synced = 0
+        for run in runs:
+            github_run_id = run.get("id")
+            if not github_run_id:
+                continue
+            record = (
+                await self.db.execute(
+                    select(ReleaseBuildRun).where(
+                        ReleaseBuildRun.workflow_id == wf.id,
+                        ReleaseBuildRun.github_run_id == github_run_id,
+                    )
+                )
+            ).scalar_one_or_none()
+            created_at = _parse_gh_dt(run.get("created_at"))
+            started_at = _parse_gh_dt(run.get("run_started_at") or run.get("created_at"))
+            completed_at = _parse_gh_dt(run.get("updated_at"))
+            status = run.get("conclusion") or run.get("status") or ""
+            wall_duration = (
+                max(0.0, (completed_at - created_at).total_seconds())
+                if completed_at and created_at
+                else 0.0
+            )
+            if record is None:
+                record = ReleaseBuildRun(
+                    workflow_id=wf.id,
+                    github_run_id=github_run_id,
+                )
+                self.db.add(record)
+            record.status = status
+            record.event = run.get("event") or ""
+            record.branch = run.get("head_branch") or run.get("head_tag") or ""
+            record.commit_sha = run.get("head_sha") or ""
+            record.created_at_remote = created_at
+            record.started_at_remote = started_at
+            record.completed_at_remote = completed_at
+            record.wall_duration = wall_duration
+            record.num_jobs = record.num_jobs or 0
+            record.conclusion_summary = record.conclusion_summary or "{}"
+            synced += 1
+        wf.last_sync_at = datetime.now(UTC)
+        await self.db.commit()
+        return synced
 
     async def _evaluate_target(
         self, target: ImageBuildMonitorTarget, wf: ReleaseWorkflow
@@ -772,7 +924,10 @@ class ImageBuildMonitorService:
             for alert in alerts:
                 alert.last_notified_at = now
                 alert.notification_success = False
-                alert.notification_error = "SMTP 未配置"
+                alert.notification_error = (
+                    "SMTP 未配置：请先在「管理 → 邮件服务」填写 SMTP 服务器、"
+                    "端口、账号和发件人邮箱后再测试"
+                )
             return 0
 
         type_zh = {"failure": "构建失败", "missing": "定时未触发", "stuck": "构建卡住"}
