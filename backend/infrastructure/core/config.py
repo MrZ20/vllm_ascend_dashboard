@@ -153,6 +153,10 @@ class Settings(BaseSettings):
     DAILY_SUMMARY_CRON_HOUR: int = 8  # 每日总结生成时间（小时），默认早上 8 点
     DAILY_SUMMARY_CRON_MINUTE: int = 0  # 每日总结生成时间（分钟）
 
+    # 镜像构建监控与通知
+    IMAGE_BUILD_MONITOR_ENABLED: bool = True
+    IMAGE_BUILD_MONITOR_INTERVAL_MINUTES: int = 10
+
     # 每日运行报告邮件推送配置（调度相关）
     REPORT_ENABLED: bool = True
     REPORT_SCHEDULE_HOUR: int = 8

@@ -965,12 +965,17 @@ class CIDailyReportBuilder:
         from infrastructure.tasks.task_manager import TaskManager
 
         failures = report.get("failures", [])
-        # 仅 conclusion=failure 且尚无 AI 分析记录（analysis_id 为空）的失败项
+        # 尚无 AI 分析记录，或上次分析失败/取消/降级/待分析的失败项均需（重新）分析。
+        # 仅跳过「分析中」与已成功的记录，避免重复入队。
+        retryable_statuses = {"failed", "cancelled", "degraded", "pending"}
         targets = [
             f for f in failures
             if (f.get("conclusion") or "").lower() == "failure"
             and f.get("job_id")
-            and not f.get("analysis_id")
+            and (
+                not f.get("analysis_id")
+                or (f.get("analysis_status") or "") in retryable_statuses
+            )
         ]
         if not targets:
             return {"triggered": 0, "skipped": 0, "total_failures": len(failures), "errors": []}

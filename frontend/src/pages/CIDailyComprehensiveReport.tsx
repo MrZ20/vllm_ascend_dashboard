@@ -42,7 +42,7 @@ import {
 } from 'recharts'
 
 import { FailureAnalysisDetailModal } from '../components/FailureAnalysisDetailModal'
-import { useJobFailureAnalysis } from '../hooks/useFailureAnalysis'
+import { useAnalyzeFailedJob, useJobFailureAnalysis } from '../hooks/useFailureAnalysis'
 import { useComprehensiveReport } from '../hooks/useCI'
 import {
   type ComprehensiveReportFailure,
@@ -149,6 +149,8 @@ function CIDailyComprehensiveReport() {
   const [detailDrawerRow, setDetailDrawerRow] = useState<ComprehensiveReportFailure | null>(null)
 
   const { data: modalAnalysis } = useJobFailureAnalysis(analysisModalJobId)
+  const reanalyzeMutation = useAnalyzeFailedJob()
+  const [reanalyzingJobId, setReanalyzingJobId] = useState<number | null>(null)
 
   const { data: report, isLoading, isError, error, refetch } = useComprehensiveReport(applied)
 
@@ -181,11 +183,13 @@ function CIDailyComprehensiveReport() {
 
   const handleAutoAnalyze = async () => {
     const failures = activeReport?.failures ?? []
+    const retryable = new Set(['failed', 'cancelled', 'degraded', 'pending'])
     const targets = failures.filter(
-      (f) => (f.conclusion || '').toLowerCase() === 'failure' && f.job_id && !f.analysis_id,
+      (f) => (f.conclusion || '').toLowerCase() === 'failure' && f.job_id
+        && (!f.analysis_id || retryable.has(f.analysis_status || '')),
     )
     if (targets.length === 0) {
-      message.info('当前窗口内失败项均已有 AI 分析，无需自动触发')
+      message.info('当前窗口内失败项均已有 AI 分析或正在分析，无需自动触发')
       return
     }
     setAnalyzing(true)
@@ -212,6 +216,26 @@ function CIDailyComprehensiveReport() {
       message.error(`自动 AI 分析失败：${e instanceof Error ? e.message : String(e)}`)
     } finally {
       setAnalyzing(false)
+    }
+  }
+
+  const handleReanalyze = async (row: ComprehensiveReportFailure) => {
+    if (!row.job_id) {
+      message.warning('该失败项缺少 job_id，无法重新分析')
+      return
+    }
+    setReanalyzingJobId(row.job_id)
+    try {
+      await reanalyzeMutation.mutateAsync({ jobId: row.job_id, force: true })
+      message.success('已重新触发 AI 分析（后台执行），稍后刷新查看结果')
+      setTimeout(() => {
+        refetch()
+        setRawLogsReport(null)
+      }, 1500)
+    } catch (e) {
+      message.error(`重新分析失败：${e instanceof Error ? e.message : String(e)}`)
+    } finally {
+      setReanalyzingJobId(null)
     }
   }
 
@@ -465,14 +489,29 @@ function CIDailyComprehensiveReport() {
         render: (_: string | null, r) => {
           const st = r.analysis_status
           const color = AI_STATUS_COLORS[st || ''] || 'default'
+          const retryable = ['failed', 'cancelled', 'degraded', 'pending'].includes(st || '')
+            || (!st && !r.analysis_id)
+          const canReanalyze = !!r.job_id && !r.children?.length && retryable
           return (
             <Space size={2}>
               <Tag color={color} style={{ fontSize: 11 }}>{AI_STATUS_ZH[st || ''] ?? st ?? '未分析'}</Tag>
-              {st === 'completed' && r.analysis_id && (
+              {(st === 'completed' || st === 'reused') && r.analysis_id && (
                 <Button size="small" type="link" icon={<RobotOutlined />}
                   style={{ padding: 0, height: 'auto' }}
                   onClick={() => setAnalysisModalJobId(r.job_id ?? null)}
                 />
+              )}
+              {canReanalyze && (
+                <Tooltip title="重新分析">
+                  <Button
+                    size="small"
+                    type="link"
+                    icon={<ReloadOutlined />}
+                    loading={reanalyzingJobId === r.job_id}
+                    style={{ padding: 0, height: 'auto' }}
+                    onClick={() => handleReanalyze(r)}
+                  />
+                </Tooltip>
               )}
             </Space>
           )
@@ -523,7 +562,7 @@ function CIDailyComprehensiveReport() {
         ),
       },
     ],
-    [],
+    [reanalyzingJobId, reanalyzeMutation],
   )
 
   const charts = (activeReport?.charts ?? {}) as Record<string, string>
@@ -982,8 +1021,8 @@ function CIDailyComprehensiveReport() {
               </div>
             )}
 
-            {/* AI 分析详情按钮 */}
-            {detailDrawerRow.analysis_status === 'completed' && detailDrawerRow.analysis_id && (
+            {/* AI 分析详情 / 重新分析按钮 */}
+            {(detailDrawerRow.analysis_status === 'completed' || detailDrawerRow.analysis_status === 'reused') && detailDrawerRow.analysis_id && (
               <Button
                 type="primary"
                 icon={<RobotOutlined />}
@@ -994,6 +1033,19 @@ function CIDailyComprehensiveReport() {
                 style={{ marginBottom: 12 }}
               >
                 查看完整 AI 分析报告
+              </Button>
+            )}
+            {detailDrawerRow.job_id && (
+              ['failed', 'cancelled', 'degraded', 'pending'].includes(detailDrawerRow.analysis_status || '')
+                || (!detailDrawerRow.analysis_status && !detailDrawerRow.analysis_id)
+            ) && (
+              <Button
+                icon={<ReloadOutlined />}
+                loading={reanalyzingJobId === detailDrawerRow.job_id}
+                onClick={() => handleReanalyze(detailDrawerRow)}
+                style={{ marginBottom: 12, marginLeft: 8 }}
+              >
+                重新分析
               </Button>
             )}
 

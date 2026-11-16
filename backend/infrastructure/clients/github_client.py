@@ -78,7 +78,13 @@ class GitHubClient:
         self.cancel_check_func = None
 
         # 创建 HTTP 客户端
-        self.client = httpx.AsyncClient(
+        self._anonymous_fallback_done = False
+        self.client = self._create_http_client()
+
+        logger.info(f"GitHubClient initialized for {self.owner}/{self.repo}")
+
+    def _create_http_client(self) -> httpx.AsyncClient:
+        return httpx.AsyncClient(
             base_url=self.BASE_URL,
             headers=self._get_headers(),
             timeout=httpx.Timeout(30.0, connect=10.0, read=60.0, write=30.0),
@@ -87,16 +93,39 @@ class GitHubClient:
             verify=not settings.DEBUG,
         )
 
-        logger.info(f"GitHubClient initialized for {self.owner}/{self.repo}")
+    async def _fallback_to_anonymous(self) -> bool:
+        """本地开发环境下，Token 失效时降级为匿名访问公开仓库。"""
+        if not settings.DEBUG or not self.token or self._anonymous_fallback_done:
+            return False
+        logger.warning(
+            "GitHub token is invalid; falling back to unauthenticated public API "
+            "for %s/%s (development only, rate limit 60/hour)",
+            self.owner,
+            self.repo,
+        )
+        self._anonymous_fallback_done = True
+        self.token = ""
+        # 401 响应可能带有 X-RateLimit-Remaining: 0，重置状态避免匿名请求继续等待。
+        self.rate_limit_remaining = 60
+        self.rate_limit_reset = None
+        self.rate_wait_loops = 0
+        try:
+            await self.client.aclose()
+        except Exception:
+            pass
+        self.client = self._create_http_client()
+        return True
 
     def _get_headers(self) -> dict[str, str]:
         """获取请求头"""
-        return {
-            "Authorization": f"Bearer {self.token}",
+        headers = {
             "Accept": "application/vnd.github+json",
             "X-GitHub-Api-Version": self.API_VERSION,
             "User-Agent": f"vllm-ascend-dashboard/{self.API_VERSION}",
         }
+        if self.token:
+            headers["Authorization"] = f"Bearer {self.token}"
+        return headers
 
     async def _request(
         self,
@@ -154,6 +183,12 @@ class GitHubClient:
                     # 检查是否是速率限制
                     remaining = response.headers.get("X-RateLimit-Remaining")
                     if remaining == "0":
+                        if not self.token:
+                            # 匿名访问不等待重置，避免本地开发请求长时间挂起。
+                            raise GitHubRateLimitError(
+                                "GitHub anonymous API rate limit exceeded; "
+                                "please configure a valid GITHUB_TOKEN"
+                            )
                         # 触顶：等待到复位后重试本次请求
                         if response.headers.get("X-RateLimit-Reset"):
                             self.rate_limit_reset = datetime.fromtimestamp(
@@ -170,6 +205,9 @@ class GitHubClient:
                         continue
 
                 if response.status_code == httpx.codes.UNAUTHORIZED:
+                    if await self._fallback_to_anonymous():
+                        retry_count += 1
+                        continue
                     raise GitHubAuthenticationError(
                         "GitHub API authentication failed (HTTP 401)"
                     )
@@ -489,7 +527,7 @@ class GitHubClient:
         async with httpx.AsyncClient(
             follow_redirects=True,
             timeout=httpx.Timeout(60.0),
-            headers={"Authorization": f"Bearer {self.token}"}
+            headers={"Authorization": f"Bearer {self.token}"} if self.token else {}
         ) as download_client:
             response = await download_client.get(download_url)
             response.raise_for_status()
