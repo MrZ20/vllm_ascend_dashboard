@@ -83,6 +83,7 @@ packages = [
     "support_matrix",
     "test_board",
     "tooling",
+    "workflow_actions",
 ]
 
 [tool.ruff]

@@ -2,6 +2,7 @@
 数据同步定时任务调度器
 使用 APScheduler 实现定时数据采集
 """
+import json
 import logging
 from datetime import UTC, date, datetime, timedelta
 
@@ -685,6 +686,54 @@ class DataSyncScheduler:
         except Exception as e:
             logger.warning(f"Failed to apply DB contributor sync schedule: {e}")
 
+        await self._reload_workflow_action_schedules()
+
+    async def _reload_workflow_action_schedules(self) -> None:
+        """Reload user-defined Workflow cron tasks from MySQL."""
+        from sqlalchemy import select
+
+        from infrastructure.persistence.models import WorkflowActionSchedule
+        from workflow_actions.schedule_schemas import cron_trigger
+
+        async with SessionLocal() as db:
+            schedules = (
+                await db.execute(
+                    select(WorkflowActionSchedule).where(
+                        WorkflowActionSchedule.enabled.is_(True)
+                    )
+                )
+            ).scalars().all()
+
+        prefix = "workflow_action_schedule:"
+        active_ids: set[str] = set()
+        for schedule in schedules:
+            job_id = f"{prefix}{schedule.id}"
+            active_ids.add(job_id)
+            try:
+                self.scheduler.add_job(
+                    self._run_workflow_action_schedule,
+                    trigger=cron_trigger(
+                        schedule.cron_expression,
+                        timezone=schedule.timezone,
+                    ),
+                    id=job_id,
+                    name=schedule.name,
+                    kwargs={"schedule_id": schedule.id},
+                    replace_existing=True,
+                )
+            except Exception as exc:
+                logger.error("Failed to register Workflow schedule %s: %s", schedule.id, exc)
+
+        for job in self.scheduler.get_jobs():
+            if job.id.startswith(prefix) and job.id not in active_ids:
+                self.scheduler.remove_job(job.id)
+
+    @staticmethod
+    async def _run_workflow_action_schedule(schedule_id: int) -> None:
+        from workflow_actions.schedules import run_scheduled_task
+
+        await run_scheduled_task(schedule_id)
+
     async def _consume_control_events(self) -> None:
         """Acknowledge durable API commands, then reload this process's schedule."""
         try:
@@ -693,7 +742,7 @@ class DataSyncScheduler:
                     result = await db.execute(
                         text(
                             """
-                            SELECT event_id FROM control_outbox
+                            SELECT event_id, payload FROM control_outbox
                             WHERE processed_at IS NULL
                               AND aggregate_type = 'scheduler'
                               AND event_type = 'scheduler.config.reload'
@@ -702,17 +751,27 @@ class DataSyncScheduler:
                             """
                         )
                     )
-                    event_ids = [row[0] for row in result.fetchall()]
-                    if event_ids:
-                        await db.execute(
-                            text(
-                                "UPDATE control_outbox SET processed_at = NOW() "
-                                "WHERE event_id IN :event_ids"
-                            ).bindparams(bindparam("event_ids", expanding=True)),
-                            {"event_ids": event_ids},
-                        )
+                    events = result.fetchall()
+                    event_ids = [row[0] for row in events]
             if event_ids:
-                await self.apply_db_config_overrides()
+                workflow_only = all(
+                    json.loads(payload or "{}").get("changed")
+                    == ["workflow_action_schedules"]
+                    for _, payload in events
+                )
+                if workflow_only:
+                    await self._reload_workflow_action_schedules()
+                else:
+                    await self.apply_db_config_overrides()
+                async with SessionLocal() as db:
+                    await db.execute(
+                        text(
+                            "UPDATE control_outbox SET processed_at = NOW() "
+                            "WHERE event_id IN :event_ids"
+                        ).bindparams(bindparam("event_ids", expanding=True)),
+                        {"event_ids": event_ids},
+                    )
+                    await db.commit()
                 logger.info("Applied %d scheduler control-plane events", len(event_ids))
         except Exception as e:
             logger.warning("Scheduler control-plane poll failed: %s", e)
@@ -919,12 +978,14 @@ class DataSyncScheduler:
                     FeatureUsageLog,
                     TokenBlacklist,
                     UserLoginLog,
+                    WorkflowActionLog,
                 )
                 lr = await db.execute(sa_delete(UserLoginLog).where(UserLoginLog.login_time < cutoff))
                 ur = await db.execute(sa_delete(FeatureUsageLog).where(FeatureUsageLog.access_time < cutoff))
                 tr = await db.execute(sa_delete(TokenBlacklist).where(TokenBlacklist.expires_at < datetime.now(UTC)))
+                wr = await db.execute(sa_delete(WorkflowActionLog).where(WorkflowActionLog.created_at < cutoff))
                 await db.commit()
-                logger.info(f"LOG CLEANUP: login={lr.rowcount}, usage={ur.rowcount}, tokens={tr.rowcount}")
+                logger.info(f"LOG CLEANUP: login={lr.rowcount}, usage={ur.rowcount}, tokens={tr.rowcount}, workflow_actions={wr.rowcount}")
             except Exception as e:
                 logger.error(f"LOG CLEANUP FAILED: {e}", exc_info=True)
                 await db.rollback()

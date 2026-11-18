@@ -52,6 +52,7 @@ from api.v1 import (
     system_config,
     test_board,
     users,
+    workflow_actions,
     workflows,
 )
 from infrastructure.core.config import settings
@@ -653,6 +654,7 @@ def create_app() -> FastAPI:
     app.include_router(performance.router, prefix="/api/v1/performance", tags=["性能数据"])
     app.include_router(users.router, prefix="/api/v1/users", tags=["用户管理"])
     app.include_router(workflows.router, prefix="/api/v1/workflows", tags=["Workflow 配置"])
+    app.include_router(workflow_actions.router, prefix="/api/v1/workflow-actions", tags=["Actions 操作"])
     app.include_router(job_owners.router, prefix="/api/v1/job-owners", tags=["Job 责任人"])
     app.include_router(system_config.router, prefix="/api/v1/system/config", tags=["系统配置"])
     app.include_router(project_dashboard.router, prefix="/api/v1/project-dashboard", tags=["项目看板"])
