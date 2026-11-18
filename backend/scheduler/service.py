@@ -15,11 +15,9 @@ from sqlalchemy import bindparam, text
 from infrastructure.clients.github_client import GitHubClient
 from infrastructure.core.config import settings
 from infrastructure.db.base import SessionLocal
-
 from infrastructure.tasks.scheduler_config import SCHEDULER_RUNTIME_SETTING_MAP
-from release_management.service import ReleaseManagementService
-from release_management.analyzer import ReleaseAnalyzer
 from release_management.ai_evaluator import TrustworthinessEvaluator
+from release_management.service import ReleaseManagementService
 
 logger = logging.getLogger(__name__)
 
@@ -1411,7 +1409,7 @@ class DataSyncScheduler:
 
     def update_contributor_sync_schedule(self, config: dict):
         """动态更新贡献者同步定时任务
-        
+
         Args:
             config: 包含 full_cron, incremental_interval_minutes, enabled 的字典
         """
@@ -1626,9 +1624,10 @@ class DataSyncScheduler:
     @staticmethod
     async def _sync_contributors_job():
         """每日贡献者同步任务 — 只同步上次成功同步以来的新增数据"""
+        from sqlalchemy import func, select
+
         from contributor_board.service import ContributorBoardService
         from infrastructure.db.base import SessionLocal as AsyncSessionLocal
-        from sqlalchemy import func, select
 
         try:
             logger.info("Starting scheduled contributor sync")
@@ -1694,9 +1693,10 @@ class DataSyncScheduler:
     @staticmethod
     async def _sync_contributors_incremental_job():
         """增量贡献者同步任务 — 只同步上次成功同步以来的新增数据"""
+        from sqlalchemy import func, select
+
         from contributor_board.service import ContributorBoardService
         from infrastructure.db.base import SessionLocal as AsyncSessionLocal
-        from sqlalchemy import func, select
 
         try:
             logger.info("Starting scheduled contributor incremental sync")
@@ -1828,10 +1828,11 @@ class DataSyncScheduler:
 
         Reads the AI report schedule config and generates a periodic report.
         """
+        from datetime import date
+
         from contributor_board.ai_report_service import AIReportService
         from contributor_board.scoring_version_schemas import AIReportGenerateRequest
         from infrastructure.db.base import SessionLocal as AsyncSessionLocal
-        from datetime import date
 
         try:
             logger.info("Starting scheduled AI report generation")
@@ -1973,8 +1974,9 @@ async def _recover_stale_scheduled_syncs() -> None:
     定时任务全部被跳过。此处仅回收 scheduled_* 来源的记录，不影响 API
     进程正在执行的手动同步。
     """
-    from infrastructure.db.base import SessionLocal as AsyncSessionLocal
     from sqlalchemy import text as _text
+
+    from infrastructure.db.base import SessionLocal as AsyncSessionLocal
 
     try:
         async with AsyncSessionLocal() as db:

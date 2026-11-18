@@ -14,24 +14,19 @@
 """
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
-from contributor_board.classifier import classify_commit
-from contributor_board.quadrant_engine import calculate_quadrants
-from contributor_board.scoring_engine import (
-    assign_tier,
-    calculate_score,
-    get_default_weights,
-    recalculate_all_scores,
-)
+from sqlalchemy import and_, delete, func, or_, select
+
 from contracts.schemas.contributor_board import (
     BuildOptimizationStats,
     BuildPlanListResponse,
     BuildPlanResponse,
+    ContributorBoardSetting,
+    ContributorBoardSettingsResponse,
     ContributorDetailResponse,
     ContributorListFilter,
     ContributorListResponse,
@@ -42,20 +37,26 @@ from contracts.schemas.contributor_board import (
     ContributorSyncHistoryResponse,
     ContributorSyncRecordResponse,
     ContributorSyncResponse,
+    ContributorSyncScheduleConfig,
     ContributorSyncSummary,
     ContributorTrendPoint,
     ContributorTrendResponse,
-    ContributorBoardSettingsResponse,
-    QuadrantPoint,
     QuadrantDataResponse,
+    QuadrantPoint,
     RoleStats,
-    ScoringWeightsConfig,
-    ContributorBoardSetting,
-    ContributorSyncScheduleConfig,
-    UpdateQuadrantConfigRequest,
-    UpdateScoringWeightsRequest,
-    UpdateRoleThresholdsRequest,
     RoleThresholdsConfig,
+    ScoringWeightsConfig,
+    UpdateQuadrantConfigRequest,
+    UpdateRoleThresholdsRequest,
+    UpdateScoringWeightsRequest,
+)
+from contributor_board.classifier import classify_commit
+from contributor_board.quadrant_engine import calculate_quadrants
+from contributor_board.scoring_engine import (
+    assign_tier,
+    calculate_score,
+    get_default_weights,
+    recalculate_all_scores,
 )
 from infrastructure.persistence.models import (
     Contributor,
@@ -68,7 +69,6 @@ from infrastructure.persistence.models import (
     ImageBuildPlan,
 )
 from infrastructure.tasks.background_task import BackgroundTaskTracker
-from sqlalchemy import and_, delete, func, or_, select
 
 logger = logging.getLogger(__name__)
 
@@ -303,7 +303,7 @@ class ContributorBoardService:
     async def get_quadrant_data(
         self, db, repo_name: str | None = None, y_axis_type: str | None = None
     ) -> QuadrantDataResponse:
-        base = select(ContributorProfile, Contributor)
+        select(ContributorProfile, Contributor)
         stmt = (
             select(ContributorProfile)
         )
@@ -367,7 +367,7 @@ class ContributorBoardService:
 
         developers = [r for r in rows if r.role == "developer"]
         reviewers = [r for r in rows if r.role == "reviewer"]
-        mixed = [r for r in rows if r.role == "contributor"]
+        [r for r in rows if r.role == "contributor"]
 
         def _avg(lst: list[ContributorProfile]) -> float:
             return round(sum(r.total_score or 0 for r in lst) / len(lst), 2) if lst else 0.0
@@ -1036,7 +1036,10 @@ class ContributorBoardService:
         窗口：默认最近 90 天；可被 period_start / period_end 覆盖。
         """
         from contracts.schemas.contributor_board import (
-            CommitTrendPoint, ReviewTrendPoint, ScoreTrendPoint, ExtendedTrendResponse,
+            CommitTrendPoint,
+            ExtendedTrendResponse,
+            ReviewTrendPoint,
+            ScoreTrendPoint,
         )
 
         today = date.today()
@@ -1166,7 +1169,7 @@ class ContributorBoardService:
         返回最近 {years} 年的格子（date + commit_count + weekDay 0=Mon..6=Sun）。
         weekDay 按 ISO weekday（周一=0，周日=6）与 GitHub 风格保持一致。
         """
-        from contracts.schemas.contributor_board import HeatmapDataPoint, ContributorHeatmapResponse
+        from contracts.schemas.contributor_board import ContributorHeatmapResponse, HeatmapDataPoint
 
         today = date.today()
         ws = today - timedelta(days=365 * max(1, years))
@@ -1203,7 +1206,9 @@ class ContributorBoardService:
         从 commit message 用 classify_commit 推断类型。
         """
         from contracts.schemas.contributor_board import (
-            ModuleDistributionItem, TypeDistributionItem, ContributorDistributionResponse,
+            ContributorDistributionResponse,
+            ModuleDistributionItem,
+            TypeDistributionItem,
         )
 
         stmt = select(DailyCommit).where(DailyCommit.author == login)
@@ -1257,7 +1262,10 @@ class ContributorBoardService:
         self, db, login: str, limit: int = 20,
     ) -> dict:
         """提交时间线：最近 limit 条 commit，按 committed_at desc。"""
-        from contracts.schemas.contributor_board import TimelineCommitItem, ContributorTimelineResponse
+        from contracts.schemas.contributor_board import (
+            ContributorTimelineResponse,
+            TimelineCommitItem,
+        )
 
         stmt = (
             select(DailyCommit)
@@ -1293,7 +1301,7 @@ class ContributorBoardService:
 
     def _to_ranking_item(self, r: ContributorProfile, rank: int) -> ContributorRankingItem:
         pr_total = (r.pr_merged or 0) + (r.pr_open or 0) + (r.pr_closed or 0)
-        merge_rate = round((r.pr_merged or 0) / pr_total, 4) if pr_total else 0.0
+        round((r.pr_merged or 0) / pr_total, 4) if pr_total else 0.0
         return ContributorRankingItem(
             login=r.login,
             score=r.total_score or 0,
