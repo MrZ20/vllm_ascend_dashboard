@@ -625,8 +625,6 @@ class ContributorSyncCollector:
 
         pr_title = pr.get("title") or f"PR #{pr_number}"
         pr_desc = pr.get("body") or ""
-        pr.get("html_url") or f"https://github.com/{project}/pull/{pr_number}"
-
         for commit in commits:
             sha = commit.get("sha", "")
             if not sha:

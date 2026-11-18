@@ -303,7 +303,6 @@ class ContributorBoardService:
     async def get_quadrant_data(
         self, db, repo_name: str | None = None, y_axis_type: str | None = None
     ) -> QuadrantDataResponse:
-        select(ContributorProfile, Contributor)
         stmt = (
             select(ContributorProfile)
         )
@@ -367,7 +366,6 @@ class ContributorBoardService:
 
         developers = [r for r in rows if r.role == "developer"]
         reviewers = [r for r in rows if r.role == "reviewer"]
-        [r for r in rows if r.role == "contributor"]
 
         def _avg(lst: list[ContributorProfile]) -> float:
             return round(sum(r.total_score or 0 for r in lst) / len(lst), 2) if lst else 0.0
@@ -1300,8 +1298,6 @@ class ContributorBoardService:
     # ══════════════════════════ 内部工具 ══════════════════════════
 
     def _to_ranking_item(self, r: ContributorProfile, rank: int) -> ContributorRankingItem:
-        pr_total = (r.pr_merged or 0) + (r.pr_open or 0) + (r.pr_closed or 0)
-        round((r.pr_merged or 0) / pr_total, 4) if pr_total else 0.0
         return ContributorRankingItem(
             login=r.login,
             score=r.total_score or 0,

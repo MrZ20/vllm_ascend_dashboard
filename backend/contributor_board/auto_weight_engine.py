@@ -138,7 +138,6 @@ def _preprocess(raw: list[float]) -> list[float]:
         return raw
 
     sorted_vals = sorted(raw)
-    len(sorted_vals)
     Q1 = _percentile(sorted_vals, 25)
     Q3 = _percentile(sorted_vals, 75)
     IQR = Q3 - Q1

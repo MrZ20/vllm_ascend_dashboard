@@ -181,7 +181,6 @@ async def export_excel(
     if not snap:
         raise HTTPException(status_code=404, detail="No score snapshots found")
 
-    await svc.get_active_version(db)
     data, filename = await do_export_excel(db, snap.scores, snap.version_id)
 
     return StreamingResponse(
